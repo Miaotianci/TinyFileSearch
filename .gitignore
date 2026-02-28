@@ -1,0 +1,10 @@
+.vs/
+.vscode/
+build/
+*.exe
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+.xmake/
