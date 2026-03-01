@@ -1,6 +1,7 @@
 #include "SearchEngine.h"
 #include <algorithm>
 #include <cctype>
+#include <future>
 
 namespace TinyFileSearch {
 
@@ -16,6 +17,10 @@ void SearchEngine::setSearchOption(SearchOption option) {
     search_option_ = option;
 }
 
+void SearchEngine::setThreadCount(size_t count) {
+    thread_count_ = count > 0 ? count : 1;
+}
+
 std::string toLower(const std::string& str) {
     std::string result = str;
     std::transform(result.begin(), result.end(), result.begin(), 
@@ -23,40 +28,65 @@ std::string toLower(const std::string& str) {
     return result;
 }
 
-std::vector<FileInfo> SearchEngine::search(const std::string& query) {
-    return searchByName(query);
+bool SearchEngine::matchName(const std::string& name, const std::string& pattern) const {
+    if (search_option_ == SearchOption::CaseSensitive) {
+        return name.find(pattern) != std::string::npos;
+    } else {
+        std::string lower_name = toLower(name);
+        std::string lower_pattern = toLower(pattern);
+        return lower_name.find(lower_pattern) != std::string::npos;
+    }
 }
 
-std::vector<FileInfo> SearchEngine::searchByName(const std::string& name_pattern) {
+template<typename Func>
+std::vector<FileInfo> SearchEngine::parallelSearch(Func&& matchFunc) {
     auto files = file_data_.lock();
-    if (!files) return {};
-
-    std::vector<FileInfo> results;
-    std::string pattern = name_pattern;
-
-    if (search_option_ == SearchOption::CaseInsensitive) {
-        pattern = toLower(pattern);
+    if (!files || files->empty()) {
+        return {};
     }
 
-    for (const auto& file : *files) {
-        std::string name = file.name;
-        if (search_option_ == SearchOption::CaseInsensitive) {
-            name = toLower(name);
-        }
+    size_t file_count = files->size();
+    size_t num_threads = std::min(thread_count_, file_count);
+    size_t chunk_size = (file_count + num_threads - 1) / num_threads;
 
-        if (name.find(pattern) != std::string::npos) {
-            results.push_back(file);
-        }
+    std::vector<std::future<std::vector<FileInfo>>> futures;
+    futures.reserve(num_threads);
+
+    for (size_t t = 0; t < num_threads; ++t) {
+        size_t start = t * chunk_size;
+        size_t end = std::min(start + chunk_size, file_count);
+
+        futures.emplace_back(std::async(std::launch::async, [&files, &matchFunc, start, end]() {
+            std::vector<FileInfo> local_results;
+            for (size_t i = start; i < end; ++i) {
+                if (matchFunc((*files)[i])) {
+                    local_results.push_back((*files)[i]);
+                }
+            }
+            return local_results;
+        }));
+    }
+
+    std::vector<FileInfo> results;
+    for (auto& future : futures) {
+        auto partial = future.get();
+        results.insert(results.end(), partial.begin(), partial.end());
     }
 
     return results;
 }
 
-std::vector<FileInfo> SearchEngine::searchByExtension(const std::string& extension) {
-    auto files = file_data_.lock();
-    if (!files) return {};
+std::vector<FileInfo> SearchEngine::search(const std::string& query) {
+    return searchByName(query);
+}
 
-    std::vector<FileInfo> results;
+std::vector<FileInfo> SearchEngine::searchByName(const std::string& name_pattern) {
+    return parallelSearch([this, &name_pattern](const FileInfo& file) {
+        return matchName(file.name, name_pattern);
+    });
+}
+
+std::vector<FileInfo> SearchEngine::searchByExtension(const std::string& extension) {
     std::string ext = extension;
     if (!ext.empty() && ext[0] != '.') {
         ext = "." + ext;
@@ -66,32 +96,19 @@ std::vector<FileInfo> SearchEngine::searchByExtension(const std::string& extensi
         ext = toLower(ext);
     }
 
-    for (const auto& file : *files) {
+    return parallelSearch([this, &ext](const FileInfo& file) {
         std::string file_ext = file.extension;
         if (search_option_ == SearchOption::CaseInsensitive) {
             file_ext = toLower(file_ext);
         }
-
-        if (file_ext == ext) {
-            results.push_back(file);
-        }
-    }
-
-    return results;
+        return file_ext == ext;
+    });
 }
 
 std::vector<FileInfo> SearchEngine::searchBySize(uint64_t min_size, uint64_t max_size) {
-    auto files = file_data_.lock();
-    if (!files) return {};
-
-    std::vector<FileInfo> results;
-    for (const auto& file : *files) {
-        if (file.size >= min_size && file.size <= max_size) {
-            results.push_back(file);
-        }
-    }
-
-    return results;
+    return parallelSearch([min_size, max_size](const FileInfo& file) {
+        return file.size >= min_size && file.size <= max_size;
+    });
 }
 
 size_t SearchEngine::getIndexedFileCount() const {
