@@ -5,4 +5,4 @@ target("tinyfilesearch")
 
     add_includedirs("include")
 
-    add_files("src/main.cpp", "src/FileScanner.cpp", "src/SearchEngine.cpp")
+    add_files("src/main.cpp", "src/FileScanner.cpp", "src/SearchEngine.cpp", "src/FileIndex.cpp")

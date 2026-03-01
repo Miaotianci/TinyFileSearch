@@ -5,12 +5,15 @@
 
 namespace TinyFileSearch {
 
-SearchEngine::SearchEngine() = default;
+SearchEngine::SearchEngine() : index_(std::make_unique<FileIndex>()) {}
 
 SearchEngine::~SearchEngine() = default;
 
 void SearchEngine::setFileData(std::shared_ptr<std::vector<FileInfo>> files) {
     file_data_ = files;
+    if (use_index_ && files) {
+        index_->build(files);
+    }
 }
 
 void SearchEngine::setSearchOption(SearchOption option) {
@@ -19,6 +22,23 @@ void SearchEngine::setSearchOption(SearchOption option) {
 
 void SearchEngine::setThreadCount(size_t count) {
     thread_count_ = count > 0 ? count : 1;
+}
+
+void SearchEngine::enableIndex(bool enable) {
+    use_index_ = enable;
+    if (enable) {
+        auto files = file_data_.lock();
+        if (files) {
+            index_->build(files);
+        }
+    }
+}
+
+void SearchEngine::buildIndex() {
+    auto files = file_data_.lock();
+    if (files) {
+        index_->build(files);
+    }
 }
 
 std::string toLower(const std::string& str) {
@@ -77,16 +97,26 @@ std::vector<FileInfo> SearchEngine::parallelSearch(Func&& matchFunc) {
 }
 
 std::vector<FileInfo> SearchEngine::search(const std::string& query) {
+    if (use_index_ && index_->getIndexedCount() > 0) {
+        return index_->search(query);
+    }
     return searchByName(query);
 }
 
 std::vector<FileInfo> SearchEngine::searchByName(const std::string& name_pattern) {
+    if (use_index_ && index_->getIndexedCount() > 0) {
+        return index_->search(name_pattern);
+    }
     return parallelSearch([this, &name_pattern](const FileInfo& file) {
         return matchName(file.name, name_pattern);
     });
 }
 
 std::vector<FileInfo> SearchEngine::searchByExtension(const std::string& extension) {
+    if (use_index_ && index_->getIndexedCount() > 0) {
+        return index_->searchByExtension(extension);
+    }
+
     std::string ext = extension;
     if (!ext.empty() && ext[0] != '.') {
         ext = "." + ext;
@@ -112,8 +142,7 @@ std::vector<FileInfo> SearchEngine::searchBySize(uint64_t min_size, uint64_t max
 }
 
 size_t SearchEngine::getIndexedFileCount() const {
-    auto files = file_data_.lock();
-    return files ? files->size() : 0;
+    return index_->getIndexedCount();
 }
 
 }
