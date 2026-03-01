@@ -5,6 +5,7 @@
 #include <chrono>
 #include "FileScanner.h"
 #include "SearchEngine.h"
+#include "HighlightHelper.h"
 
 using namespace TinyFileSearch;
 
@@ -18,6 +19,9 @@ void printUsage(const char* program_name) {
 }
 
 int main(int argc, char* argv[]) {
+    // Enable console colors
+    HighlightHelper::enableColor();
+
     std::string root_path = ".";
     std::string search_query;
     bool include_hidden = false;
@@ -88,7 +92,7 @@ int main(int argc, char* argv[]) {
               << search_duration.count() << "ms\n\n";
 
     for (const auto& file : results) {
-        std::cout << file.path << "\n";
+        std::cout << HighlightHelper::highlight(file.path, search_query, false) << "\n";
     }
 
     return 0;
