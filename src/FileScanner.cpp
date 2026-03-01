@@ -1,8 +1,14 @@
 #include "FileScanner.h"
-#include <filesystem>
 #include <algorithm>
+#include <deque>
 
 namespace TinyFileSearch {
+
+FileScanner::FileScanner() = default;
+
+FileScanner::~FileScanner() {
+    stop();
+}
 
 void FileScanner::setRootPath(const std::string& path) {
     root_path_ = path;
@@ -16,6 +22,10 @@ void FileScanner::setMaxDepth(int depth) {
     max_depth_ = depth;
 }
 
+void FileScanner::setThreadCount(size_t count) {
+    thread_count_ = count > 0 ? count : 1;
+}
+
 void FileScanner::setProgressCallback(ProgressCallback callback) {
     progress_callback_ = std::move(callback);
 }
@@ -23,61 +33,105 @@ void FileScanner::setProgressCallback(ProgressCallback callback) {
 bool FileScanner::scan() {
     files_.clear();
     stop_requested_ = false;
+    scanned_count_ = 0;
 
-    try {
-        std::filesystem::path root(root_path_);
-        if (!std::filesystem::exists(root)) {
-            return false;
+    std::filesystem::path root(root_path_);
+    if (!std::filesystem::exists(root)) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        dir_queue_ = std::queue<std::pair<std::filesystem::path, int>>();
+        dir_queue_.push({root, 0});
+    }
+
+    std::vector<std::thread> workers;
+    workers.reserve(thread_count_);
+
+    for (size_t i = 0; i < thread_count_; ++i) {
+        workers.emplace_back(&FileScanner::workerThread, this);
+    }
+
+    for (auto& worker : workers) {
+        worker.join();
+    }
+
+    return true;
+}
+
+void FileScanner::workerThread() {
+    while (!stop_requested_) {
+        std::filesystem::path dir_path;
+        int depth;
+
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            if (dir_queue_.empty()) {
+                break;
+            }
+            dir_path = dir_queue_.front().first;
+            depth = dir_queue_.front().second;
+            dir_queue_.pop();
         }
 
-        auto visitor = [this](const std::filesystem::path& path) {
+        processDirectory(dir_path, depth);
+    }
+}
+
+bool FileScanner::processDirectory(const std::filesystem::path& dir_path, int depth) {
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(dir_path)) {
             if (stop_requested_) {
-                return;
+                return false;
             }
 
-            if (!std::filesystem::is_directory(path)) {
-                FileInfo info;
-                info.path = path.string();
-                info.name = path.filename().string();
-                info.extension = path.extension().string();
+            try {
+                if (entry.is_directory()) {
+                    if (!entry.path().filename().empty()) {
+                        std::string name = entry.path().filename().string();
+                        if (include_hidden_ || name[0] != '.') {
+                            if (max_depth_ < 0 || depth < max_depth_) {
+                                {
+                                    std::lock_guard<std::mutex> lock(queue_mutex_);
+                                    dir_queue_.push({entry.path(), depth + 1});
+                                }
+                            }
+                        }
+                    }
+                } else if (entry.is_regular_file()) {
+                    FileInfo info;
+                    info.path = entry.path().string();
+                    info.name = entry.path().filename().string();
+                    info.extension = entry.path().extension().string();
 
-                try {
-                    auto status = std::filesystem::status(path);
-                    info.size = std::filesystem::is_regular_file(status) 
-                        ? std::filesystem::file_size(path) : 0;
-                    info.modified_time = std::filesystem::last_write_time(path);
-                } catch (...) {
-                    info.size = 0;
-                }
+                    try {
+                        info.size = entry.file_size();
+                        info.modified_time = entry.last_write_time();
+                    } catch (...) {
+                        info.size = 0;
+                    }
 
-                if (!info.name.empty() && (include_hidden_ || info.name[0] != '.')) {
-                    files_.push_back(info);
-                    if (progress_callback_) {
-                        progress_callback_(files_.size());
+                    if (!info.name.empty() && (include_hidden_ || info.name[0] != '.')) {
+                        {
+                            std::lock_guard<std::mutex> lock(result_mutex_);
+                            files_.push_back(info);
+                            ++scanned_count_;
+                        }
+
+                        if (progress_callback_) {
+                            auto count = scanned_count_.load();
+                            if (count % 1000 == 0) {
+                                progress_callback_(count);
+                            }
+                        }
                     }
                 }
-            }
-        };
-
-        if (max_depth_ > 0) {
-            for (auto it = std::filesystem::recursive_directory_iterator(root); 
-                 it != std::filesystem::recursive_directory_iterator(); 
-                 ++it) {
-                if (stop_requested_) break;
-                if (it.depth() > max_depth_) {
-                    it.disable_recursion_pending();
-                    continue;
-                }
-                visitor(it->path());
-            }
-        } else {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
-                if (stop_requested_) break;
-                visitor(entry.path());
+            } catch (...) {
+                continue;
             }
         }
-
-    } catch (const std::exception&) {
+    } catch (...) {
         return false;
     }
 

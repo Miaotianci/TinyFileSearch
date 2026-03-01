@@ -5,6 +5,11 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <queue>
+#include <memory>
 
 namespace TinyFileSearch {
 
@@ -20,12 +25,13 @@ class FileScanner {
 public:
     using ProgressCallback = std::function<void(size_t scanned_count)>;
 
-    FileScanner() = default;
-    ~FileScanner() = default;
+    FileScanner();
+    ~FileScanner();
 
     void setRootPath(const std::string& path);
     void setIncludeHidden(bool include);
     void setMaxDepth(int depth);
+    void setThreadCount(size_t count);
 
     bool scan();
     void stop();
@@ -35,11 +41,22 @@ public:
     void setProgressCallback(ProgressCallback callback);
 
 private:
+    void workerThread();
+    bool processDirectory(const std::filesystem::path& dir_path, int depth);
+
     std::string root_path_;
     bool include_hidden_ = false;
     int max_depth_ = -1;
+    size_t thread_count_ = std::thread::hardware_concurrency();
+    
     std::vector<FileInfo> files_;
-    bool stop_requested_ = false;
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<size_t> scanned_count_{0};
+    
+    std::queue<std::pair<std::filesystem::path, int>> dir_queue_;
+    std::mutex queue_mutex_;
+    std::mutex result_mutex_;
+    
     ProgressCallback progress_callback_;
 };
 
