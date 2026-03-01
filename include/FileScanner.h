@@ -47,7 +47,7 @@ private:
     std::string root_path_;
     bool include_hidden_ = false;
     int max_depth_ = -1;
-    size_t thread_count_ = std::thread::hardware_concurrency();
+    size_t thread_count_ = std::thread::hardware_concurrency() / 2;
     
     std::vector<FileInfo> files_;
     std::atomic<bool> stop_requested_{false};
